@@ -1,6 +1,34 @@
 """
 Personal Codex Agent - Streamlit Application
-Main web interface for the Personal Codex Agent system
+
+File purpose:
+    Main Streamlit UI for the Personal Codex Agent. Orchestrates the app lifecycle
+    (initialization, file uploads, mode selection, chat flow) and holds minimal
+    session-state wiring required by the UI.
+
+Key components:
+    - Streamlit configuration and custom CSS
+    - Session state initialization helpers
+    - Agent creation and document upload handling
+    - Chat display and interaction flow
+
+Dependencies:
+    - streamlit
+    - src.agent.PersonalCodexAgent
+    - src.document_processor.DocumentProcessor
+
+Usage:
+    Run locally (Windows cmd.exe):
+
+    ```
+    streamlit run app.py
+    ```
+
+Design notes:
+    - The UI stores the heavy `PersonalCodexAgent` instance in `st.session_state.agent`
+      to avoid recreating large objects on every rerun. Keep that contract when
+      refactoring.
+    - The app intentionally presents a mock-mode warning when API keys are absent.
 """
 
 import streamlit as st
@@ -76,7 +104,24 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 def initialize_session_state():
-    """Initialize session state variables"""
+    """
+    Initialize Streamlit `st.session_state` keys used by the app.
+
+    Args:
+        None
+
+    Returns:
+        None: Mutates `st.session_state` in-place to ensure keys exist:
+            - agent: Optional[PersonalCodexAgent]
+            - chat_history: List of chat messages
+            - documents_loaded: bool flag
+            - current_mode: str currently selected mode
+            - knowledge_base_info: metadata about the loaded KB
+
+    Example:
+        >>> initialize_session_state()
+        # after call: st.session_state.agent may be None or an agent instance
+    """
     if 'agent' not in st.session_state:
         st.session_state.agent = None
     if 'chat_history' not in st.session_state:
@@ -89,7 +134,20 @@ def initialize_session_state():
         st.session_state.knowledge_base_info = {}
 
 def create_agent():
-    """Create and initialize the Personal Codex Agent"""
+    """
+    Create and initialize a `PersonalCodexAgent` using environment keys.
+
+    The function reads `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` to decide the
+    default `llm_provider`. If no API key is present, it will choose `none` and
+    the agent will operate in mock/fallback mode.
+
+    Returns:
+        PersonalCodexAgent | None: Initialized agent or `None` on error.
+
+    Example:
+        >>> agent = create_agent()
+        >>> assert agent is not None
+    """
     try:
         # Check for API keys
         openai_key = os.getenv("OPENAI_API_KEY")
@@ -116,7 +174,26 @@ def create_agent():
         return None
 
 def load_documents(agent: PersonalCodexAgent, uploaded_files: List[Any]) -> bool:
-    """Process and load uploaded documents"""
+    """
+    Save uploaded files to a temporary directory, run document processing, and
+    add results to the agent's knowledge base.
+
+    Args:
+        agent (PersonalCodexAgent): Agent used to process and index documents
+        uploaded_files (List[Any]): List of Streamlit uploaded file objects
+
+    Returns:
+        bool: True on success, False on failure
+
+    Notes:
+        - Files are written to a temporary directory and passed to
+          `PersonalCodexAgent.load_documents` which expects a directory path.
+        - On success the knowledge base is saved and `st.session_state.knowledge_base_info`
+          is updated so the sidebar can display metadata.
+
+    Example:
+        >>> success = load_documents(agent, uploaded_files)
+    """
     if not uploaded_files:
         return False
     
@@ -150,7 +227,21 @@ def load_documents(agent: PersonalCodexAgent, uploaded_files: List[Any]) -> bool
         return False
 
 def display_chat_message(message: Dict[str, Any], is_user: bool = False):
-    """Display a chat message with proper styling"""
+    """
+    Render one chat message in the main UI column using the CSS classes defined
+    at the top of the module.
+
+    Args:
+        message (Dict[str, Any]): Message dictionary with keys like `content`,
+            `mode`, `confidence`, `sources`.
+        is_user (bool): If True, render the message as a user message style.
+
+    Returns:
+        None: Uses `st.markdown` to render HTML fragments.
+
+    Example:
+        >>> display_chat_message({'content': 'Hello'}, is_user=True)
+    """
     if is_user:
         st.markdown(f"""
         <div class="chat-message user-message">
@@ -174,7 +265,24 @@ def display_chat_message(message: Dict[str, Any], is_user: bool = False):
         """, unsafe_allow_html=True)
 
 def main():
-    """Main application function"""
+    """
+    Streamlit application entrypoint. Boots session state, renders sidebar
+    configuration, initializes/loads the `PersonalCodexAgent`, and drives the
+    chat interaction loop.
+
+    Key responsibilities:
+        - Initialize session state
+        - Offer agent/config controls in the sidebar
+        - Process document uploads and initialize knowledge base
+        - Manage chat input and display conversation history
+
+    Returns:
+        None
+
+    Example:
+        Run the app:
+        >>> streamlit run app.py
+    """
     
     # Initialize session state
     initialize_session_state()
@@ -306,6 +414,7 @@ def main():
             )
             
             if selected_mode != st.session_state.current_mode:
+                # Delegate mode switching to the agent to keep UI logic thin.
                 mode_switch_msg = st.session_state.agent.switch_mode(selected_mode)
                 st.session_state.current_mode = selected_mode
                 st.info(mode_switch_msg)
@@ -346,6 +455,8 @@ def main():
                 
                 # Generate agent response
                 with st.spinner("🤔 Thinking..."):
+                    # Core RAG flow: agent searches the KB, formats prompts, and
+                    # calls the configured LLM (or mock) to generate a response.
                     response = st.session_state.agent.generate_response(user_input)
                     
                     # Add agent response to history

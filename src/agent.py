@@ -1,6 +1,30 @@
 """
 Core Agent Logic for Personal Codex Agent
-Manages conversation flow, mode switching, and response generation
+
+File purpose:
+    Implements the `PersonalCodexAgent` which orchestrates the RAG pipeline:
+    - Document processing via `DocumentProcessor`
+    - Embedding and FAISS indexing via `EmbeddingsSystem`
+    - Prompt templating and conversation history via `PromptManager`
+    - LLM client selection (OpenAI / Anthropic / Mock)
+
+Key responsibilities:
+    - Loading and indexing documents into the knowledge base
+    - Searching the knowledge base
+    - Formatting prompts and generating LLM responses
+    - Mode switching and simple conversation state
+
+Dependencies:
+    - openai or anthropic SDKs (optional)
+    - src.document_processor.DocumentProcessor
+    - src.embeddings.EmbeddingsSystem
+    - src.prompts.PromptManager
+    - src.mock_llm.MockLLMClient
+
+Usage example:
+    >>> agent = PersonalCodexAgent(llm_provider='none')
+    >>> agent.load_documents('data/raw')
+    >>> resp = agent.generate_response('Tell me about your projects')
 """
 
 import os
@@ -26,7 +50,25 @@ from .prompts import PromptManager
 from .mock_llm import MockLLMClient
 
 class PersonalCodexAgent:
-    """Main agent class that orchestrates the Personal Codex system"""
+    """
+    Main agent class that orchestrates the Personal Codex system.
+
+    Purpose and responsibility:
+        - Glue together document processing, embedding indexing, prompt
+          management, and LLM interaction.
+
+    Key attributes:
+        - llm_provider (str): Selected LLM provider ('openai', 'anthropic', 'none')
+        - document_processor (DocumentProcessor): Parser & chunker instance
+        - embeddings_system (EmbeddingsSystem): Embedding & vector DB manager
+        - prompt_manager (PromptManager): Template and context utilities
+        - openai_client / anthropic_client: Optional SDK clients or MockLLMClient
+
+    Example:
+        >>> agent = PersonalCodexAgent()
+        >>> agent.switch_mode('fast_facts')
+        'Switched to Fast Facts Mode: ...'
+    """
     
     def __init__(self, 
                  llm_provider: str = "openai",
@@ -81,7 +123,15 @@ class PersonalCodexAgent:
         }
     
     def _initialize_llm_clients(self):
-        """Initialize LLM API clients based on provider"""
+        """
+        Initialize LLM clients (OpenAI, Anthropic) or fall back to `MockLLMClient`.
+
+        Behavior:
+            - If `MOCK_MODE` is set or no API key is available the agent will use
+                `MockLLMClient` to avoid external dependencies.
+            - When a real API key is present and the corresponding SDK is
+                importable, the appropriate client is constructed.
+        """
         # Check for mock mode
         mock_mode = os.getenv('MOCK_MODE', 'false').lower() == 'true'
         api_key = os.getenv("OPENAI_API_KEY")
@@ -123,7 +173,19 @@ class PersonalCodexAgent:
             self.openai_client = MockLLMClient()
     
     def load_documents(self, directory_path: str = "data/raw") -> bool:
-        """Load and process documents from the specified directory"""
+        """
+        Load and process documents from disk, index them in the embeddings system,
+        and save a small processed summary to `data/processed/processed_documents.json`.
+
+        Args:
+            directory_path (str): Path containing raw documents
+
+        Returns:
+            bool: True on success, False on failure
+
+        Example:
+            >>> success = agent.load_documents('data/raw')
+        """
         try:
             print(f"Loading documents from {directory_path}...")
             
@@ -158,7 +220,12 @@ class PersonalCodexAgent:
             return False
     
     def _save_processed_documents(self, processed_docs: List[Dict[str, Any]]):
-        """Save processed documents to disk for reference"""
+        """
+        Persist a trimmed JSON summary of processed documents to
+        `data/processed/processed_documents.json` for debugging and inspection.
+
+        This method truncates chunk text to keep the saved file small.
+        """
         try:
             output_path = Path("data/processed/processed_documents.json")
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -188,7 +255,15 @@ class PersonalCodexAgent:
             print(f"Warning: Could not save processed documents summary: {e}")
     
     def switch_mode(self, new_mode: str) -> str:
-        """Switch to a different interaction mode"""
+        """
+        Switch the conversational mode used to generate responses.
+
+        Args:
+            new_mode (str): Mode key (e.g. 'interview', 'personal_storytelling')
+
+        Returns:
+            str: Human-readable status message about the switch.
+        """
         if new_mode not in self.modes:
             return f"Unknown mode: {new_mode}. Available modes: {', '.join(self.modes.keys())}"
         
@@ -207,7 +282,16 @@ class PersonalCodexAgent:
         return self.current_mode
     
     def search_knowledge_base(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        """Search the knowledge base for relevant information"""
+        """
+        Search the embeddings-backed knowledge base for relevant chunks.
+
+        Args:
+            query (str): Natural language search query
+            top_k (int): Number of results to return
+
+        Returns:
+            List[Dict[str, Any]]: Search results from `EmbeddingsSystem.search`
+        """
         if not self.knowledge_base_initialized:
             return []
         
@@ -220,7 +304,24 @@ class PersonalCodexAgent:
     
     def generate_response(self, user_question: str, 
                          include_sources: bool = True) -> Dict[str, Any]:
-        """Generate a response to the user's question"""
+        """
+        Generate an answer to the user's question using the RAG pipeline.
+
+        Steps:
+            1. Validate that documents are loaded
+            2. Search the knowledge base for relevant chunks
+            3. Format system and mode prompts via `PromptManager`
+            4. Call the configured LLM (OpenAI/Anthropic) or fallback logic
+            5. Optionally attach source citations and store conversation history
+
+        Args:
+            user_question (str): The user's input question
+            include_sources (bool): Attach source filenames to the response
+
+        Returns:
+            Dict[str, Any]: Response dictionary with keys: 'response', 'sources',
+                'mode', 'confidence'
+        """
         
         # Check if we have documents loaded
         if not self.documents_loaded:
@@ -255,7 +356,13 @@ class PersonalCodexAgent:
     
     def _generate_llm_response(self, user_question: str, 
                               search_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Generate response using the configured LLM"""
+        """
+        Orchestrate prompt creation and call the configured LLM client.
+
+        This method isolates prompt construction from provider-specific calls
+        (`_generate_openai_response` and `_generate_anthropic_response`). If an
+        LLM call fails the method falls back to `_generate_fallback_response`.
+        """
         
         # Prepare context and prompts
         conversation_context = self.prompt_manager.get_conversation_context()
@@ -283,7 +390,14 @@ class PersonalCodexAgent:
     
     def _generate_openai_response(self, full_prompt: str, user_question: str,
                                  search_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Generate response using OpenAI"""
+        """
+        Make an OpenAI chat completion call and package the result.
+
+        Notes:
+            - The code expects `self.openai_client` to be a client object with
+              `chat.completions.create(...)` semantics (the OpenAI SDK wrapper
+              used in this repo).
+        """
         try:
             response = self.openai_client.chat.completions.create(
                 model="gpt-3.5-turbo",
@@ -311,7 +425,10 @@ class PersonalCodexAgent:
     
     def _generate_anthropic_response(self, full_prompt: str, user_question: str,
                                     search_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Generate response using Anthropic Claude"""
+        """
+        Make a request to Anthropic Claude and return a standardized response
+        dict.
+        """
         try:
             response = self.anthropic_client.messages.create(
                 model="claude-3-sonnet-20240229",
@@ -337,7 +454,11 @@ class PersonalCodexAgent:
     
     def _generate_fallback_response(self, user_question: str,
                                    search_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Generate a fallback response when LLM is not available"""
+        """
+        Produce a lightweight fallback response when no LLM client is
+        available. The method uses simple templates per mode and provides
+        basic source attribution when search results are available.
+        """
         
         if not search_results:
             return {
@@ -371,11 +492,16 @@ class PersonalCodexAgent:
         }
     
     def get_knowledge_base_info(self) -> Dict[str, Any]:
-        """Get information about the current knowledge base"""
+        """
+        Return a small metadata dictionary describing the knowledge base
+        currently loaded in the embeddings system.
+        """
         return self.embeddings_system.get_database_info()
     
     def save_knowledge_base(self, file_path: str = "data/processed/knowledge_base"):
-        """Save the knowledge base to disk"""
+        """
+        Save the knowledge base to disk.
+        """
         try:
             self.embeddings_system.save_database(file_path)
             print(f"Knowledge base saved to {file_path}")
@@ -383,7 +509,9 @@ class PersonalCodexAgent:
             print(f"Error saving knowledge base: {e}")
     
     def load_knowledge_base(self, file_path: str = "data/processed/knowledge_base"):
-        """Load the knowledge base from disk"""
+        """
+        Load the knowledge base from disk.
+        """
         try:
             self.embeddings_system.load_database(file_path)
             self.knowledge_base_initialized = True
@@ -392,7 +520,9 @@ class PersonalCodexAgent:
             print(f"Error loading knowledge base: {e}")
     
     def get_conversation_summary(self) -> Dict[str, Any]:
-        """Get a summary of the current conversation"""
+        """
+        Get a summary of the current conversation.
+        """
         return {
             'total_turns': len(self.conversation_history),
             'current_mode': self.current_mode,
