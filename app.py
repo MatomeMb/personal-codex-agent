@@ -1,0 +1,420 @@
+"""
+Personal Codex Agent - Streamlit Application
+Main web interface for the Personal Codex Agent system
+"""
+
+import streamlit as st
+import os
+import tempfile
+from pathlib import Path
+from typing import List, Dict, Any
+import json
+
+# Mock mode detection
+MOCK_MODE = os.getenv('MOCK_MODE', 'false').lower() == 'true'
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
+IS_MOCK = MOCK_MODE or not OPENAI_API_KEY or OPENAI_API_KEY in ['your_openai_api_key_here', 'mock_mode']
+
+# Import our custom modules
+from src.agent import PersonalCodexAgent
+from src.document_processor import DocumentProcessor
+
+# Page configuration
+st.set_page_config(
+    page_title="Personal Codex Agent",
+    page_icon="🧠",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: #1f77b4;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .mode-selector {
+        background-color: #f0f2f6;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+    }
+    .chat-message {
+        padding: 1rem;
+        margin: 0.5rem 0;
+        border-radius: 0.5rem;
+    }
+    .user-message {
+        background-color: #e3f2fd;
+        border-left: 4px solid #2196f3;
+    }
+    .agent-message {
+        background-color: #f3e5f5;
+        border-left: 4px solid #9c27b0;
+    }
+    .source-info {
+        font-size: 0.8rem;
+        color: #666;
+        font-style: italic;
+        margin-top: 0.5rem;
+    }
+    .confidence-badge {
+        display: inline-block;
+        padding: 0.25rem 0.5rem;
+        border-radius: 0.25rem;
+        font-size: 0.75rem;
+        font-weight: bold;
+    }
+    .confidence-high { background-color: #c8e6c9; color: #2e7d32; }
+    .confidence-medium { background-color: #fff3e0; color: #f57c00; }
+    .confidence-low { background-color: #ffcdd2; color: #c62828; }
+</style>
+""", unsafe_allow_html=True)
+
+def initialize_session_state():
+    """Initialize session state variables"""
+    if 'agent' not in st.session_state:
+        st.session_state.agent = None
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+    if 'documents_loaded' not in st.session_state:
+        st.session_state.documents_loaded = False
+    if 'current_mode' not in st.session_state:
+        st.session_state.current_mode = "interview"
+    if 'knowledge_base_info' not in st.session_state:
+        st.session_state.knowledge_base_info = {}
+
+def create_agent():
+    """Create and initialize the Personal Codex Agent"""
+    try:
+        # Check for API keys
+        openai_key = os.getenv("OPENAI_API_KEY")
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        
+        if not openai_key and not anthropic_key:
+            st.warning("⚠️ No API keys found. Please set OPENAI_API_KEY or ANTHROPIC_API_KEY environment variables.")
+            st.info("The agent will work with limited functionality using fallback responses.")
+            llm_provider = "none"
+        else:
+            llm_provider = "openai" if openai_key else "anthropic"
+        
+        # Create agent
+        agent = PersonalCodexAgent(
+            llm_provider=llm_provider,
+            vector_db_type="faiss",  # Use FAISS for better performance
+            chunk_size=1000,
+            chunk_overlap=200
+        )
+        
+        return agent
+    except Exception as e:
+        st.error(f"Error creating agent: {e}")
+        return None
+
+def load_documents(agent: PersonalCodexAgent, uploaded_files: List[Any]) -> bool:
+    """Process and load uploaded documents"""
+    if not uploaded_files:
+        return False
+    
+    try:
+        # Create temporary directory for uploaded files
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            
+            # Save uploaded files to temporary directory
+            for uploaded_file in uploaded_files:
+                file_path = temp_path / uploaded_file.name
+                with open(file_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+            
+            # Process documents
+            success = agent.load_documents(str(temp_path))
+            
+            if success:
+                # Save knowledge base
+                agent.save_knowledge_base()
+                
+                # Update session state
+                st.session_state.knowledge_base_info = agent.get_knowledge_base_info()
+                
+                return True
+            else:
+                return False
+                
+    except Exception as e:
+        st.error(f"Error processing documents: {e}")
+        return False
+
+def display_chat_message(message: Dict[str, Any], is_user: bool = False):
+    """Display a chat message with proper styling"""
+    if is_user:
+        st.markdown(f"""
+        <div class="chat-message user-message">
+            <strong>You:</strong> {message['content']}
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        # Determine confidence badge styling
+        confidence_class = f"confidence-{message.get('confidence', 'medium')}"
+        confidence_text = message.get('confidence', 'medium').title()
+        
+        st.markdown(f"""
+        <div class="chat-message agent-message">
+            <strong>Personal Codex Agent ({message.get('mode', 'Unknown').title()} Mode):</strong><br>
+            {message['content']}
+            <div class="source-info">
+                <span class="confidence-badge {confidence_class}">Confidence: {confidence_text}</span>
+                {f" | Sources: {', '.join(message.get('sources', []))}" if message.get('sources') else ""}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+def main():
+    """Main application function"""
+    
+    # Initialize session state
+    initialize_session_state()
+    
+    # Header
+    st.markdown('<h1 class="main-header">🧠 Personal Codex Agent</h1>', unsafe_allow_html=True)
+    
+    # Mock mode display
+    if IS_MOCK:
+        st.warning("🎭 Running in Mock Mode - No API key required for demonstration")
+        st.info("Add your OpenAI API key to .env file for full functionality")
+    
+    st.markdown("""
+    <p style="text-align: center; font-size: 1.1rem; color: #666;">
+        Your AI-powered personal representative, trained on your documents and experiences
+    </p>
+    """, unsafe_allow_html=True)
+    
+    # Sidebar
+    with st.sidebar:
+        st.header("⚙️ Configuration")
+        
+        # LLM Provider Selection
+        st.subheader("AI Provider")
+        llm_provider = st.selectbox(
+            "Choose your AI provider:",
+            ["openai", "anthropic"],
+            index=0,
+            help="Select which AI service to use for generating responses"
+        )
+        
+        # Vector Database Selection
+        st.subheader("Vector Database")
+        vector_db_type = st.selectbox(
+            "Choose vector database:",
+            ["faiss", "chroma"],
+            index=0,
+            help="FAISS is faster, ChromaDB is more feature-rich"
+        )
+        
+        # Document Processing Settings
+        st.subheader("Document Processing")
+        chunk_size = st.slider(
+            "Chunk Size:",
+            min_value=500,
+            max_value=2000,
+            value=1000,
+            step=100,
+            help="Size of text chunks for processing"
+        )
+        
+        chunk_overlap = st.slider(
+            "Chunk Overlap:",
+            min_value=100,
+            max_value=500,
+            value=200,
+            step=50,
+            help="Overlap between text chunks"
+        )
+        
+        # Initialize/Create Agent Button
+        if st.button("🔄 Initialize Agent", type="primary"):
+            with st.spinner("Initializing Personal Codex Agent..."):
+                st.session_state.agent = PersonalCodexAgent(
+                    llm_provider=llm_provider,
+                    vector_db_type=vector_db_type,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap
+                )
+                st.success("Agent initialized successfully!")
+        
+        # Agent Status
+        if st.session_state.agent:
+            st.subheader("🤖 Agent Status")
+            st.info("✅ Agent Ready")
+            
+            # Knowledge Base Info
+            if st.session_state.knowledge_base_info:
+                st.subheader("📚 Knowledge Base")
+                kb_info = st.session_state.knowledge_base_info
+                st.write(f"**Type:** {kb_info.get('type', 'Unknown')}")
+                st.write(f"**Total Chunks:** {kb_info.get('total_chunks', 0)}")
+                if kb_info.get('type') == 'faiss':
+                    st.write(f"**Vectors:** {kb_info.get('total_vectors', 0)}")
+                    st.write(f"**Dimension:** {kb_info.get('dimension', 0)}")
+        
+        # Document Upload Section
+        st.header("📁 Document Upload")
+        st.info("Upload your personal documents to train the agent")
+        
+        uploaded_files = st.file_uploader(
+            "Choose files to upload:",
+            type=['pdf', 'docx', 'md', 'txt'],
+            accept_multiple_files=True,
+            help="Supported formats: PDF, Word, Markdown, Text"
+        )
+        
+        if uploaded_files and st.button("📥 Process Documents"):
+            if st.session_state.agent:
+                with st.spinner("Processing documents..."):
+                    success = load_documents(st.session_state.agent, uploaded_files)
+                    if success:
+                        st.session_state.documents_loaded = True
+                        st.success(f"✅ Successfully processed {len(uploaded_files)} documents!")
+                    else:
+                        st.error("❌ Failed to process documents")
+            else:
+                st.error("Please initialize the agent first")
+    
+    # Main content area
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        # Mode Selector
+        if st.session_state.agent:
+            st.subheader("🎭 Interaction Mode")
+            
+            mode_options = {
+                "interview": "🎯 Interview Mode",
+                "personal_storytelling": "📖 Personal Storytelling Mode", 
+                "fast_facts": "⚡ Fast Facts Mode"
+            }
+            
+            selected_mode = st.selectbox(
+                "Choose your interaction style:",
+                options=list(mode_options.keys()),
+                format_func=lambda x: mode_options[x],
+                index=list(mode_options.keys()).index(st.session_state.current_mode)
+            )
+            
+            if selected_mode != st.session_state.current_mode:
+                mode_switch_msg = st.session_state.agent.switch_mode(selected_mode)
+                st.session_state.current_mode = selected_mode
+                st.info(mode_switch_msg)
+            
+            # Mode description
+            mode_descriptions = {
+                "interview": "Professional, concise responses suitable for job interviews and networking",
+                "personal_storytelling": "Reflective, narrative responses that showcase personality and values",
+                "fast_facts": "Quick, scannable information in bullet-point format"
+            }
+            st.info(f"**{mode_options[selected_mode]}**: {mode_descriptions[selected_mode]}")
+        
+        # Chat Interface
+        st.subheader("💬 Chat with Your Personal Codex Agent")
+        
+        if not st.session_state.agent:
+            st.info("👈 Please initialize the agent in the sidebar first")
+        elif not st.session_state.documents_loaded:
+            st.info("📁 Please upload and process some documents to start chatting")
+        else:
+            # Display chat history
+            for message in st.session_state.chat_history:
+                if message['type'] == 'user':
+                    display_chat_message({'content': message['content']}, is_user=True)
+                else:
+                    display_chat_message(message)
+            
+            # Chat input
+            user_input = st.chat_input("Ask me anything about your experience, skills, or background...")
+            
+            if user_input:
+                # Add user message to history
+                st.session_state.chat_history.append({
+                    'type': 'user',
+                    'content': user_input,
+                    'timestamp': None
+                })
+                
+                # Generate agent response
+                with st.spinner("🤔 Thinking..."):
+                    response = st.session_state.agent.generate_response(user_input)
+                    
+                    # Add agent response to history
+                    st.session_state.chat_history.append({
+                        'type': 'agent',
+                        'content': response['response'],
+                        'mode': response['mode'],
+                        'confidence': response['confidence'],
+                        'sources': response.get('sources', []),
+                        'timestamp': None
+                    })
+                
+                # Rerun to display new messages
+                st.rerun()
+    
+    with col2:
+        # Quick Actions Panel
+        st.subheader("🚀 Quick Actions")
+        
+        if st.session_state.agent and st.session_state.documents_loaded:
+            # Sample Questions
+            st.subheader("💡 Sample Questions")
+            sample_questions = [
+                "What kind of engineer are you?",
+                "What are your strongest technical skills?",
+                "What projects are you most proud of?",
+                "What do you value in team culture?",
+                "How do you approach learning new things?",
+                "What tasks energize you?",
+                "How do you collaborate with others?"
+            ]
+            
+            for question in sample_questions:
+                if st.button(question, key=f"sample_{hash(question)}"):
+                    # Add to chat input (this would need to be handled differently in a real app)
+                    st.info("Click the sample question to see how the agent responds!")
+            
+            # Conversation Stats
+            st.subheader("📊 Conversation Stats")
+            if st.session_state.agent:
+                summary = st.session_state.agent.get_conversation_summary()
+                st.write(f"**Total Turns:** {summary['total_turns']}")
+                st.write(f"**Current Mode:** {summary['current_mode'].title()}")
+                st.write(f"**Documents Loaded:** {'✅' if summary['documents_loaded'] else '❌'}")
+                st.write(f"**Knowledge Base:** {'✅' if summary['knowledge_base_initialized'] else '❌'}")
+        
+        # Help and Information
+        st.subheader("❓ Help")
+        st.info("""
+        **How to use:**
+        1. Initialize the agent in the sidebar
+        2. Upload your personal documents
+        3. Choose an interaction mode
+        4. Start chatting!
+        
+        **Supported file types:**
+        - PDF (CVs, resumes)
+        - Word documents
+        - Markdown files
+        - Text files
+        """)
+    
+    # Footer
+    st.markdown("---")
+    st.markdown("""
+    <p style="text-align: center; color: #666;">
+        Personal Codex Agent - Your AI-powered personal representative
+    </p>
+    """, unsafe_allow_html=True)
+
+if __name__ == "__main__":
+    main()
