@@ -1,6 +1,11 @@
 """
 Embeddings System for Personal Codex Agent
 Handles vector embeddings and similarity search for RAG implementation
+
+UPDATED FOR MOCK MODE DEPLOYMENT:
+- ChromaDB dependencies removed to reduce installation weight
+- FAISS-only operation for Streamlit Cloud compatibility
+- Simplified codebase for mock mode functionality
 """
 
 import os
@@ -12,8 +17,6 @@ from pathlib import Path
 try:
     from sentence_transformers import SentenceTransformer
     import faiss
-    import chromadb
-    from chromadb.config import Settings
 except ImportError as e:
     print(f"Warning: Some embedding libraries not available: {e}")
 
@@ -33,8 +36,6 @@ class EmbeddingsSystem:
         self.vector_db_type = vector_db_type
         self.model = None
         self.vector_db = None
-        self.chroma_client = None
-        self.chroma_collection = None
         self.chunk_embeddings = []
         self.chunk_metadata = []
         
@@ -55,10 +56,11 @@ class EmbeddingsSystem:
         """Initialize the vector database"""
         if self.vector_db_type == "faiss":
             self._initialize_faiss()
-        elif self.vector_db_type == "chroma":
-            self._initialize_chroma()
         else:
-            raise ValueError(f"Unsupported vector database type: {self.vector_db_type}")
+            # Force FAISS for mock mode - ChromaDB removed for cloud deployment
+            print(f"Warning: {self.vector_db_type} not supported, using FAISS instead")
+            self.vector_db_type = "faiss"
+            self._initialize_faiss()
     
     def _initialize_faiss(self):
         """Initialize FAISS vector database"""
@@ -71,28 +73,8 @@ class EmbeddingsSystem:
             print(f"Error initializing FAISS: {e}")
             self.vector_db = None
     
-    def _initialize_chroma(self):
-        """Initialize ChromaDB vector database"""
-        try:
-            # Create a persistent client
-            db_path = Path("data/processed/chroma_db")
-            db_path.mkdir(parents=True, exist_ok=True)
-            
-            self.chroma_client = chromadb.PersistentClient(
-                path=str(db_path),
-                settings=Settings(anonymized_telemetry=False)
-            )
-            
-            # Create or get collection
-            self.chroma_collection = self.chroma_client.get_or_create_collection(
-                name="personal_codex",
-                metadata={"description": "Personal Codex Agent Knowledge Base"}
-            )
-            print("Initialized ChromaDB vector database")
-        except Exception as e:
-            print(f"Error initializing ChromaDB: {e}")
-            self.chroma_client = None
-            self.chroma_collection = None
+    # ChromaDB initialization removed for mock mode deployment
+    # This reduces dependencies and ensures FAISS-only operation
     
     def generate_embeddings(self, texts: List[str]) -> np.ndarray:
         """Generate embeddings for a list of texts"""
@@ -126,10 +108,8 @@ class EmbeddingsSystem:
         try:
             embeddings = self.generate_embeddings(all_chunks)
             
-            if self.vector_db_type == "faiss":
-                self._add_to_faiss(embeddings, all_metadata)
-            elif self.vector_db_type == "chroma":
-                self._add_to_chroma(all_chunks, embeddings, all_metadata)
+            # FAISS only for mock mode deployment
+            self._add_to_faiss(embeddings, all_metadata)
             
             print(f"Added {len(all_chunks)} chunks to vector database")
             
@@ -151,25 +131,8 @@ class EmbeddingsSystem:
         self.chunk_embeddings.extend(embeddings_normalized)
         self.chunk_metadata.extend(metadata)
     
-    def _add_to_chroma(self, texts: List[str], embeddings: np.ndarray, 
-                       metadata: List[Dict[str, Any]]):
-        """Add embeddings to ChromaDB"""
-        if self.chroma_collection is None:
-            raise RuntimeError("ChromaDB not initialized")
-        
-        # Prepare data for ChromaDB
-        ids = [f"chunk_{i}" for i in range(len(texts))]
-        
-        # Convert embeddings to list format for ChromaDB
-        embeddings_list = embeddings.tolist()
-        
-        # Add to ChromaDB
-        self.chroma_collection.add(
-            embeddings=embeddings_list,
-            documents=texts,
-            metadatas=metadata,
-            ids=ids
-        )
+    # ChromaDB add method removed for mock mode deployment
+    # FAISS-only operation reduces dependencies and ensures cloud compatibility
     
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """Search for similar documents based on query"""
@@ -180,12 +143,8 @@ class EmbeddingsSystem:
             # Generate query embedding
             query_embedding = self.generate_embeddings([query])
             
-            if self.vector_db_type == "faiss":
-                return self._search_faiss(query_embedding, top_k)
-            elif self.vector_db_type == "chroma":
-                return self._search_chroma(query, top_k)
-            else:
-                raise ValueError(f"Unsupported vector database type: {self.vector_db_type}")
+            # FAISS only for mock mode deployment
+            return self._search_faiss(query_embedding, top_k)
                 
         except Exception as e:
             print(f"Error during search: {e}")
@@ -217,41 +176,13 @@ class EmbeddingsSystem:
         
         return results
     
-    def _search_chroma(self, query: str, top_k: int) -> List[Dict[str, Any]]:
-        """Search ChromaDB"""
-        if self.chroma_collection is None:
-            return []
-        
-        try:
-            # Search in ChromaDB
-            results = self.chroma_collection.query(
-                query_texts=[query],
-                n_results=top_k
-            )
-            
-            # Format results
-            formatted_results = []
-            if results['documents'] and results['metadatas'] and results['distances']:
-                for i in range(len(results['documents'][0])):
-                    formatted_results.append({
-                        'content': results['documents'][0][i],
-                        'metadata': results['metadatas'][0][i],
-                        'score': 1.0 - float(results['distances'][0][i])  # Convert distance to similarity
-                    })
-            
-            return formatted_results
-            
-        except Exception as e:
-            print(f"Error searching ChromaDB: {e}")
-            return []
+    # ChromaDB search method removed for mock mode deployment
+    # FAISS-only operation ensures cloud compatibility
     
     def save_database(self, file_path: str):
         """Save the vector database to disk"""
-        if self.vector_db_type == "faiss":
-            self._save_faiss(file_path)
-        elif self.vector_db_type == "chroma":
-            # ChromaDB is persistent by default
-            print("ChromaDB is persistent - no need to save separately")
+        # FAISS only for mock mode deployment
+        self._save_faiss(file_path)
     
     def _save_faiss(self, file_path: str):
         """Save FAISS database to disk"""
@@ -275,11 +206,8 @@ class EmbeddingsSystem:
     
     def load_database(self, file_path: str):
         """Load the vector database from disk"""
-        if self.vector_db_type == "faiss":
-            self._load_faiss(file_path)
-        elif self.vector_db_type == "chroma":
-            # ChromaDB loads automatically
-            print("ChromaDB loads automatically from persistent storage")
+        # FAISS only for mock mode deployment
+        self._load_faiss(file_path)
     
     def _load_faiss(self, file_path: str):
         """Load FAISS database from disk"""
@@ -299,29 +227,13 @@ class EmbeddingsSystem:
     
     def get_database_info(self) -> Dict[str, Any]:
         """Get information about the current database"""
-        if self.vector_db_type == "faiss":
-            if self.vector_db is None:
-                return {"status": "not_initialized", "type": "faiss"}
-            
-            return {
-                "type": "faiss",
-                "total_vectors": self.vector_db.ntotal,
-                "dimension": self.vector_db.d,
-                "total_chunks": len(self.chunk_metadata)
-            }
+        # FAISS only for mock mode deployment
+        if self.vector_db is None:
+            return {"status": "not_initialized", "type": "faiss"}
         
-        elif self.vector_db_type == "chroma":
-            if self.chroma_collection is None:
-                return {"status": "not_initialized", "type": "chroma"}
-            
-            try:
-                count = self.chroma_collection.count()
-                return {
-                    "type": "chroma",
-                    "total_chunks": count,
-                    "collection_name": "personal_codex"
-                }
-            except Exception as e:
-                return {"status": "error", "type": "chroma", "error": str(e)}
-        
-        return {"status": "unknown", "type": "unknown"}
+        return {
+            "type": "faiss",
+            "total_vectors": self.vector_db.ntotal,
+            "dimension": self.vector_db.d,
+            "total_chunks": len(self.chunk_metadata)
+        }
