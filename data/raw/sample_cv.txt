@@ -1,0 +1,35 @@
+John Doe - Software Engineer
+============================
+
+TECHNICAL SKILLS
+- Languages: Python, JavaScript, TypeScript, SQL
+- Frameworks: React, Django, Flask, Node.js
+- Cloud: AWS (EC2, S3, RDS, Lambda)
+- Databases: PostgreSQL, Redis, MongoDB
+
+EXPERIENCE
+Software Engineer at TechCorp (2021-2024)
+- Built scalable web applications serving 10,000+ users
+- Reduced API response times by 60% through optimization
+- Led team of 3 developers on major product launch
+
+PROJECTS
+Real-time Collaboration Platform
+- WebSocket architecture for live editing
+- Redis caching for sub-100ms response times
+- PostgreSQL with conflict resolution system
+- Handles 10,000+ concurrent users
+
+E-commerce API
+- RESTful API with Django REST framework
+- JWT authentication and rate limiting
+- Automated testing with 95% coverage
+- CI/CD pipeline with GitHub Actions
+
+EDUCATION
+Bachelor of Science in Computer Science
+University of Technology, 2021
+
+CERTIFICATIONS
+AWS Certified Developer Associate
+MongoDB Certified Developer
