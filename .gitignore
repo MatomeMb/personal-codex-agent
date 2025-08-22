@@ -21,9 +21,17 @@ venv.bak/
 # OS
 .DS_Store
 Thumbs.db
+Desktop.lnk
 
 # Environment variables
 .env
+
+# Temporary files
+.import_check.py
+.run_tests_mock.py
+cursor_build_personal_codex_agent_proje.md
+python
+set
 
 # Data
 data/processed/*
