@@ -47,13 +47,13 @@ import json
 
 # Import our custom modules
 try:
-from src.agent import PersonalCodexAgent
-from src.document_processor import DocumentProcessor
-from src.config import config
-from src.exceptions import PersonalCodexException, DeploymentError
-from src.performance import get_performance_dashboard, performance_monitor, cache_manager
+    from src.agent import PersonalCodexAgent
+    from src.document_processor import DocumentProcessor
+    from src.config import config
+    from src.exceptions import PersonalCodexException, DeploymentError
+    from src.performance import get_performance_dashboard, performance_monitor, cache_manager
 except ImportError as e:
-    st.error(f"❌ Failed to import required modules: {e}")
+    st.error(f"Failed to import required modules: {e}")
     st.error("Please ensure all dependencies are installed and the src directory is accessible.")
     st.stop()
 
