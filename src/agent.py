@@ -29,6 +29,7 @@ Usage example:
 
 import os
 import json
+import logging
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 
@@ -48,6 +49,9 @@ from .document_processor import DocumentProcessor
 from .embeddings import EmbeddingsSystem
 from .prompts import PromptManager
 from .mock_llm import MockLLMClient
+from .exceptions import PersonalCodexException, DocumentProcessingError, EmbeddingGenerationError, VectorDatabaseError, LLMClientError
+from .config import config
+from .performance import monitor_performance, cached, performance_monitor, cache_manager
 
 class PersonalCodexAgent:
     """
@@ -84,24 +88,32 @@ class PersonalCodexAgent:
             chunk_size: Size of text chunks for processing
             chunk_overlap: Overlap between chunks
         """
+        self.logger = logging.getLogger(__name__)
         self.llm_provider = llm_provider
         self.vector_db_type = vector_db_type
         
-        # Initialize components
-        self.document_processor = DocumentProcessor(chunk_size, chunk_overlap)
-        self.embeddings_system = EmbeddingsSystem(vector_db_type=vector_db_type)
-        self.prompt_manager = PromptManager()
-        
-        # Initialize LLM clients
-        self.openai_client = None
-        self.anthropic_client = None
-        self._initialize_llm_clients()
-        
-        # State management
-        self.conversation_history = []
-        self.current_mode = "interview"
-        self.documents_loaded = False
-        self.knowledge_base_initialized = False
+        try:
+            # Initialize components
+            self.document_processor = DocumentProcessor(chunk_size, chunk_overlap)
+            self.embeddings_system = EmbeddingsSystem(vector_db_type=vector_db_type)
+            self.prompt_manager = PromptManager()
+            
+            # Initialize LLM clients
+            self.openai_client = None
+            self.anthropic_client = None
+            self._initialize_llm_clients()
+            
+            # State management
+            self.conversation_history = []
+            self.current_mode = "interview"
+            self.documents_loaded = False
+            self.knowledge_base_initialized = False
+            
+            self.logger.info("Personal Codex Agent initialized successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Error initializing Personal Codex Agent: {e}")
+            raise PersonalCodexException(f"Failed to initialize agent: {e}")
         
         # Mode configurations
         self.modes = {
@@ -172,6 +184,7 @@ class PersonalCodexAgent:
             print("🎭 No LLM client available - using mock client for demonstration")
             self.openai_client = MockLLMClient()
     
+    @monitor_performance
     def load_documents(self, directory_path: str = "data/raw") -> bool:
         """
         Load and process documents from disk, index them in the embeddings system,
@@ -187,37 +200,52 @@ class PersonalCodexAgent:
             >>> success = agent.load_documents('data/raw')
         """
         try:
-            print(f"Loading documents from {directory_path}...")
+            self.logger.info(f"Loading documents from {directory_path}...")
             
             # Check if directory exists and has files
             if not Path(directory_path).exists():
-                print(f"Directory {directory_path} does not exist")
-                return False
+                self.logger.error(f"Directory {directory_path} does not exist")
+                raise DocumentProcessingError(f"Directory {directory_path} does not exist")
             
             # Process documents
-            processed_docs = self.document_processor.process_directory(directory_path)
+            try:
+                processed_docs = self.document_processor.process_directory(directory_path)
+            except Exception as e:
+                self.logger.error(f"Error processing documents: {e}")
+                raise DocumentProcessingError(f"Failed to process documents: {e}")
             
             if not processed_docs:
-                print("No documents found to process")
+                self.logger.warning("No documents found to process")
                 return False
             
-            print(f"Processed {len(processed_docs)} documents")
+            self.logger.info(f"Processed {len(processed_docs)} documents")
             
             # Add to vector database
-            self.embeddings_system.add_documents(processed_docs)
+            try:
+                self.embeddings_system.add_documents(processed_docs)
+            except Exception as e:
+                self.logger.error(f"Error adding documents to vector database: {e}")
+                raise VectorDatabaseError(f"Failed to add documents to vector database: {e}")
             
             # Save processed documents for reference
-            self._save_processed_documents(processed_docs)
+            try:
+                self._save_processed_documents(processed_docs)
+            except Exception as e:
+                self.logger.warning(f"Could not save processed documents: {e}")
+                # Don't fail the whole operation for this
             
             self.documents_loaded = True
             self.knowledge_base_initialized = True
             
-            print("Documents loaded and knowledge base initialized successfully")
+            self.logger.info("Documents loaded and knowledge base initialized successfully")
             return True
             
+        except (DocumentProcessingError, VectorDatabaseError) as e:
+            self.logger.error(f"Document processing error: {e}")
+            raise
         except Exception as e:
-            print(f"Error loading documents: {e}")
-            return False
+            self.logger.error(f"Unexpected error loading documents: {e}")
+            raise DocumentProcessingError(f"Unexpected error loading documents: {e}")
     
     def _save_processed_documents(self, processed_docs: List[Dict[str, Any]]):
         """
@@ -227,7 +255,7 @@ class PersonalCodexAgent:
         This method truncates chunk text to keep the saved file small.
         """
         try:
-            output_path = Path("data/processed/processed_documents.json")
+            output_path = Path(config.get_processed_documents_path())
             output_path.parent.mkdir(parents=True, exist_ok=True)
             
             # Prepare data for JSON serialization
@@ -249,10 +277,11 @@ class PersonalCodexAgent:
             with open(output_path, 'w', encoding='utf-8') as f:
                 json.dump(serializable_docs, f, indent=2, ensure_ascii=False)
             
-            print(f"Saved processed documents summary to {output_path}")
+            self.logger.info(f"Saved processed documents summary to {output_path}")
             
         except Exception as e:
-            print(f"Warning: Could not save processed documents summary: {e}")
+            self.logger.warning(f"Could not save processed documents summary: {e}")
+            raise DocumentProcessingError(f"Failed to save processed documents: {e}")
     
     def switch_mode(self, new_mode: str) -> str:
         """
@@ -281,6 +310,8 @@ class PersonalCodexAgent:
         """Get the current interaction mode"""
         return self.current_mode
     
+    @monitor_performance
+    @cached(ttl=300)  # Cache for 5 minutes
     def search_knowledge_base(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """
         Search the embeddings-backed knowledge base for relevant chunks.
@@ -302,6 +333,7 @@ class PersonalCodexAgent:
             print(f"Error searching knowledge base: {e}")
             return []
     
+    @monitor_performance
     def generate_response(self, user_question: str, 
                          include_sources: bool = True) -> Dict[str, Any]:
         """
@@ -498,26 +530,34 @@ class PersonalCodexAgent:
         """
         return self.embeddings_system.get_database_info()
     
-    def save_knowledge_base(self, file_path: str = "data/processed/knowledge_base"):
+    def save_knowledge_base(self, file_path: str = None):
         """
         Save the knowledge base to disk.
         """
         try:
+            if file_path is None:
+                file_path = config.get_database_path()
+            
             self.embeddings_system.save_database(file_path)
-            print(f"Knowledge base saved to {file_path}")
+            self.logger.info(f"Knowledge base saved to {file_path}")
         except Exception as e:
-            print(f"Error saving knowledge base: {e}")
+            self.logger.error(f"Error saving knowledge base: {e}")
+            raise VectorDatabaseError(f"Failed to save knowledge base: {e}")
     
-    def load_knowledge_base(self, file_path: str = "data/processed/knowledge_base"):
+    def load_knowledge_base(self, file_path: str = None):
         """
         Load the knowledge base from disk.
         """
         try:
+            if file_path is None:
+                file_path = config.get_database_path()
+            
             self.embeddings_system.load_database(file_path)
             self.knowledge_base_initialized = True
-            print(f"Knowledge base loaded from {file_path}")
+            self.logger.info(f"Knowledge base loaded from {file_path}")
         except Exception as e:
-            print(f"Error loading knowledge base: {e}")
+            self.logger.error(f"Error loading knowledge base: {e}")
+            raise VectorDatabaseError(f"Failed to load knowledge base: {e}")
     
     def get_conversation_summary(self) -> Dict[str, Any]:
         """

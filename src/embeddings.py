@@ -27,6 +27,7 @@ Usage example:
 import os
 import pickle
 import numpy as np
+import logging
 from typing import List, Dict, Any
 from pathlib import Path
 
@@ -35,6 +36,8 @@ try:
     import faiss
 except ImportError as e:
     print(f"Warning: Some embedding libraries not available: {e}")
+
+from .exceptions import EmbeddingGenerationError, VectorDatabaseError
 
 
 class EmbeddingsSystem:
@@ -69,6 +72,7 @@ class EmbeddingsSystem:
             model_name: Sentence transformer model to use
             vector_db_type: Type of vector database ('faiss' or 'chroma')
         """
+        self.logger = logging.getLogger(__name__)
         self.model_name = model_name
         self.vector_db_type = vector_db_type
         self.model = None
@@ -76,8 +80,13 @@ class EmbeddingsSystem:
         self.chunk_embeddings = []
         self.chunk_metadata = []
 
-        self._initialize_model()
-        self._initialize_vector_db()
+        try:
+            self._initialize_model()
+            self._initialize_vector_db()
+            self.logger.info("EmbeddingsSystem initialized successfully")
+        except Exception as e:
+            self.logger.error(f"Error initializing EmbeddingsSystem: {e}")
+            raise EmbeddingGenerationError(f"Failed to initialize embeddings system: {e}")
 
     def _initialize_model(self):
         """
@@ -142,16 +151,24 @@ class EmbeddingsSystem:
             np.ndarray: Array of embeddings shaped (len(texts), dimension).
 
         Raises:
-            RuntimeError: If the model is not initialized.
+            EmbeddingGenerationError: If the model is not initialized or generation fails.
         """
         if self.model is None:
-            raise RuntimeError("Embedding model not initialized")
+            self.logger.error("Embedding model not initialized")
+            raise EmbeddingGenerationError("Embedding model not initialized")
+
+        if not texts:
+            self.logger.warning("Empty text list provided for embedding generation")
+            return np.array([])
 
         try:
+            self.logger.info(f"Generating embeddings for {len(texts)} texts")
             embeddings = self.model.encode(texts, convert_to_tensor=False)
+            self.logger.info(f"Successfully generated embeddings with shape {embeddings.shape}")
             return embeddings
         except Exception as e:
-            raise Exception(f"Error generating embeddings: {e}")
+            self.logger.error(f"Error generating embeddings: {e}")
+            raise EmbeddingGenerationError(f"Failed to generate embeddings: {e}")
 
     def add_documents(self, processed_documents: List[Dict[str, Any]]):
         """

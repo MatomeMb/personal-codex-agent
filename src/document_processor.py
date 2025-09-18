@@ -5,6 +5,7 @@ Handles multiple file formats and extracts text for RAG implementation
 
 import os
 import re
+import logging
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 
@@ -16,37 +17,55 @@ try:
 except ImportError:
     print("Warning: Some document processing libraries not available")
 
+from .exceptions import DocumentProcessingError
+
 class DocumentProcessor:
     """Handles document loading, processing, and chunking for RAG implementation"""
     
     def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
+        self.logger = logging.getLogger(__name__)
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.supported_formats = ['.pdf', '.docx', '.md', '.txt']
+        
+        self.logger.info(f"DocumentProcessor initialized with chunk_size={chunk_size}, chunk_overlap={chunk_overlap}")
     
     def load_document(self, file_path: str) -> Dict[str, Any]:
         """Load a document and return its content and metadata"""
         file_path = Path(file_path)
         
+        self.logger.info(f"Loading document: {file_path}")
+        
         if not file_path.exists():
-            raise FileNotFoundError(f"File not found: {file_path}")
+            self.logger.error(f"File not found: {file_path}")
+            raise DocumentProcessingError(f"File not found: {file_path}")
         
         file_extension = file_path.suffix.lower()
         
         if file_extension not in self.supported_formats:
-            raise ValueError(f"Unsupported file format: {file_extension}")
+            self.logger.error(f"Unsupported file format: {file_extension}")
+            raise DocumentProcessingError(f"Unsupported file format: {file_extension}. Supported formats: {', '.join(self.supported_formats)}")
         
         try:
             if file_extension == '.pdf':
-                return self._load_pdf(file_path)
+                result = self._load_pdf(file_path)
             elif file_extension == '.docx':
-                return self._load_docx(file_path)
+                result = self._load_docx(file_path)
             elif file_extension == '.md':
-                return self._load_markdown(file_path)
+                result = self._load_markdown(file_path)
             elif file_extension == '.txt':
-                return self._load_text(file_path)
+                result = self._load_text(file_path)
+            else:
+                raise DocumentProcessingError(f"Unhandled file format: {file_extension}")
+            
+            self.logger.info(f"Successfully loaded document: {file_path}")
+            return result
+            
+        except DocumentProcessingError:
+            raise
         except Exception as e:
-            raise Exception(f"Error processing {file_path}: {str(e)}")
+            self.logger.error(f"Unexpected error processing {file_path}: {e}")
+            raise DocumentProcessingError(f"Error processing {file_path}: {str(e)}")
     
     def _load_pdf(self, file_path: Path) -> Dict[str, Any]:
         """Extract text from PDF files"""
@@ -201,17 +220,38 @@ class DocumentProcessor:
     def process_directory(self, directory_path: str) -> List[Dict[str, Any]]:
         """Process all supported documents in a directory"""
         directory = Path(directory_path)
-        if not directory.exists() or not directory.is_dir():
-            raise ValueError(f"Invalid directory: {directory_path}")
+        
+        self.logger.info(f"Processing directory: {directory_path}")
+        
+        if not directory.exists():
+            self.logger.error(f"Directory does not exist: {directory_path}")
+            raise DocumentProcessingError(f"Directory does not exist: {directory_path}")
+        
+        if not directory.is_dir():
+            self.logger.error(f"Path is not a directory: {directory_path}")
+            raise DocumentProcessingError(f"Path is not a directory: {directory_path}")
         
         processed_documents = []
+        errors = []
         
         for file_path in directory.iterdir():
             if file_path.is_file() and file_path.suffix.lower() in self.supported_formats:
                 try:
+                    self.logger.info(f"Processing file: {file_path}")
                     processed = self.process_document(str(file_path))
                     processed_documents.append(processed)
+                    self.logger.info(f"Successfully processed: {file_path}")
+                except DocumentProcessingError as e:
+                    self.logger.error(f"Failed to process {file_path}: {e}")
+                    errors.append(f"{file_path}: {e}")
                 except Exception as e:
-                    print(f"Warning: Could not process {file_path}: {e}")
+                    self.logger.error(f"Unexpected error processing {file_path}: {e}")
+                    errors.append(f"{file_path}: {e}")
         
+        if errors:
+            self.logger.warning(f"Encountered {len(errors)} errors during processing")
+            for error in errors:
+                self.logger.warning(f"Processing error: {error}")
+        
+        self.logger.info(f"Processed {len(processed_documents)} documents successfully")
         return processed_documents
