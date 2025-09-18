@@ -205,6 +205,197 @@ The system follows a modular architecture with the following components:
    - Check file permissions
    - Verify file formats are supported
 
+## Deployment Troubleshooting
+
+### Streamlit Cloud Deployment Issues
+
+#### 303 Redirect Errors
+**Problem**: Streamlit Cloud returns 303 redirect errors
+**Solutions**:
+1. **Check File Paths**: Ensure all file paths use `Path` objects instead of string concatenation
+   ```python
+   # ✅ Correct
+   from pathlib import Path
+   data_path = Path('data') / 'raw'
+   
+   # ❌ Incorrect (may fail in cloud)
+   data_path = 'data/raw'
+   ```
+
+2. **Environment Variables**: Set all required environment variables in Streamlit Cloud
+   - Go to your app settings in Streamlit Cloud
+   - Add environment variables:
+     - `MOCK_MODE=true` (for demo mode)
+     - `LOG_LEVEL=INFO` (for debugging)
+
+3. **Dependencies**: Ensure all dependencies are in `requirements.txt`
+   ```bash
+   # Check your requirements.txt includes all packages
+   pip freeze > requirements.txt
+   ```
+
+4. **File System Access**: Use relative paths and ensure directories exist
+   ```python
+   # ✅ Correct
+   Path('data').mkdir(exist_ok=True)
+   Path('data/raw').mkdir(exist_ok=True)
+   Path('data/processed').mkdir(exist_ok=True)
+   ```
+
+#### Memory Issues
+**Problem**: App runs out of memory during deployment
+**Solutions**:
+1. **Optimize Dependencies**: Use lighter alternatives where possible
+   ```python
+   # Use faiss-cpu instead of faiss-gpu for cloud deployment
+   faiss-cpu>=1.7.4
+   ```
+
+2. **Reduce Model Size**: Use smaller embedding models
+   ```python
+   # In src/embeddings.py
+   model_name = "all-MiniLM-L6-v2"  # Smaller, faster model
+   ```
+
+3. **Implement Caching**: Use the built-in caching system
+   ```python
+   from src.performance import cached
+   
+   @cached(ttl=300)  # Cache for 5 minutes
+   def expensive_operation():
+       # Your code here
+   ```
+
+#### Performance Issues
+**Problem**: Slow response times in cloud deployment
+**Solutions**:
+1. **Enable Performance Monitoring**: Use the built-in performance dashboard
+2. **Optimize Database Queries**: Use the caching system for frequent operations
+3. **Monitor Resource Usage**: Check the performance dashboard in the app
+
+### Local Development Issues
+
+#### Port Conflicts
+**Problem**: Port 8501 is already in use
+**Solutions**:
+```bash
+# Use a different port
+streamlit run app.py --server.port 8502
+
+# Or kill the process using port 8501
+# Windows
+netstat -ano | findstr :8501
+taskkill /PID <PID_NUMBER> /F
+
+# Linux/macOS
+lsof -ti:8501 | xargs kill -9
+```
+
+#### Virtual Environment Issues
+**Problem**: Virtual environment not working properly
+**Solutions**:
+```bash
+# Recreate virtual environment
+rm -rf .venv  # or rmdir /s .venv on Windows
+python -m venv .venv
+source .venv/bin/activate  # or .venv\Scripts\activate on Windows
+pip install -r requirements.txt
+```
+
+### Testing Issues
+
+#### Test Failures
+**Problem**: Tests are failing
+**Solutions**:
+1. **Run Individual Tests**:
+   ```bash
+   python -m pytest tests/test_agent.py -v
+   python -m pytest tests/test_mock_llm.py -v
+   ```
+
+2. **Check Dependencies**: Ensure all test dependencies are installed
+   ```bash
+   pip install pytest pytest-cov
+   ```
+
+3. **Mock Mode Testing**: Run tests in mock mode
+   ```bash
+   MOCK_MODE=true python -m pytest
+   ```
+
+#### Performance Testing
+**Problem**: Performance tests are slow
+**Solutions**:
+1. **Use Mock Mode**: Set `MOCK_MODE=true` for faster testing
+2. **Reduce Test Data**: Use smaller test datasets
+3. **Parallel Testing**: Use pytest-xdist for parallel test execution
+   ```bash
+   pip install pytest-xdist
+   python -m pytest -n auto
+   ```
+
+### Debugging Tips
+
+#### Enable Debug Logging
+```python
+# Set environment variable
+export LOG_LEVEL=DEBUG
+
+# Or in your code
+import logging
+logging.basicConfig(level=logging.DEBUG)
+```
+
+#### Use Debug Information
+The app includes a debug information panel that shows:
+- Python version and working directory
+- Environment variables
+- File system access
+- Cloud deployment status
+
+#### Check Logs
+```bash
+# Streamlit logs
+streamlit run app.py --logger.level debug
+
+# Application logs
+tail -f personal_codex.log
+```
+
+### Common Error Messages
+
+#### "ModuleNotFoundError"
+- **Cause**: Missing dependencies or virtual environment not activated
+- **Solution**: Install requirements and activate virtual environment
+
+#### "PermissionError"
+- **Cause**: File system permissions or antivirus blocking
+- **Solution**: Check file permissions and antivirus settings
+
+#### "ConnectionError"
+- **Cause**: Network issues or API key problems
+- **Solution**: Check internet connection and API key validity
+
+#### "MemoryError"
+- **Cause**: Insufficient memory for large operations
+- **Solution**: Use mock mode or optimize memory usage
+
+### Getting Help
+
+1. **Check the Debug Panel**: Use the debug information in the app
+2. **Review Logs**: Check application and system logs
+3. **Test in Mock Mode**: Use mock mode to isolate issues
+4. **Run Tests**: Use the test suite to identify problems
+5. **Performance Dashboard**: Monitor performance metrics
+
+### Best Practices for Deployment
+
+1. **Use Mock Mode for Testing**: Test thoroughly in mock mode before deploying
+2. **Monitor Performance**: Use the built-in performance monitoring
+3. **Handle Errors Gracefully**: Implement proper error handling and recovery
+4. **Optimize Dependencies**: Use only necessary dependencies
+5. **Test Locally First**: Always test locally before deploying to cloud
+
 ## Future Improvements
 - Self-reflective agent mode for deeper questions
 - Easy dataset extension capability
