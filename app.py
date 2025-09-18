@@ -11,11 +11,14 @@ Key components:
     - Session state initialization helpers
     - Agent creation and document upload handling
     - Chat display and interaction flow
+    - Comprehensive error handling and cloud deployment support
 
 Dependencies:
     - streamlit
     - src.agent.PersonalCodexAgent
     - src.document_processor.DocumentProcessor
+    - src.config.Config
+    - src.exceptions
 
 Usage:
     Run locally (Windows cmd.exe):
@@ -29,23 +32,36 @@ Design notes:
       to avoid recreating large objects on every rerun. Keep that contract when
       refactoring.
     - The app intentionally presents a mock-mode warning when API keys are absent.
+    - Enhanced with comprehensive error handling and cloud deployment compatibility.
 """
 
 import streamlit as st
 import os
+import sys
 import tempfile
+import logging
+import traceback
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import json
 
-# Mock mode detection
-MOCK_MODE = os.getenv('MOCK_MODE', 'false').lower() == 'true'
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
-IS_MOCK = MOCK_MODE or not OPENAI_API_KEY or OPENAI_API_KEY in ['your_openai_api_key_here', 'mock_mode']
-
 # Import our custom modules
+try:
 from src.agent import PersonalCodexAgent
 from src.document_processor import DocumentProcessor
+from src.config import config
+from src.exceptions import PersonalCodexException, DeploymentError
+from src.performance import get_performance_dashboard, performance_monitor, cache_manager
+except ImportError as e:
+    st.error(f"❌ Failed to import required modules: {e}")
+    st.error("Please ensure all dependencies are installed and the src directory is accessible.")
+    st.stop()
+
+# Setup logging
+logger = logging.getLogger(__name__)
+
+# Mock mode detection using config
+IS_MOCK = config.is_mock_mode()
 
 # Page configuration
 st.set_page_config(
@@ -103,6 +119,35 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+def display_debug_info():
+    """Display debugging information for troubleshooting deployment issues"""
+    with st.expander("🔧 Debug Information", expanded=False):
+        st.write("**Python Version:**", sys.version)
+        st.write("**Working Directory:**", str(Path.cwd()))
+        st.write("**Data Directory:**", str(config.data_dir))
+        st.write("**Cloud Deployment:**", config.is_cloud_deployment)
+        st.write("**Mock Mode:**", IS_MOCK)
+        st.write("**LLM Provider:**", config.get_llm_provider())
+        
+        # Environment variables (filtered for security)
+        env_vars = {
+            'STREAMLIT_SHARING_MODE': os.getenv('STREAMLIT_SHARING_MODE'),
+            'STREAMLIT_SERVER_HEADLESS': os.getenv('STREAMLIT_SERVER_HEADLESS'),
+            'STREAMLIT_SERVER_ADDRESS': os.getenv('STREAMLIT_SERVER_ADDRESS'),
+            'LOG_LEVEL': os.getenv('LOG_LEVEL'),
+        }
+        st.write("**Environment Variables:**", env_vars)
+        
+        # File system check
+        try:
+            files = list(Path('.').glob('**/*'))
+            st.write(f"**Available Files:** {len(files)} files found")
+            if st.checkbox("Show file list"):
+                for file in files[:20]:  # Show first 20 files
+                    st.write(f"- {file}")
+        except Exception as e:
+            st.write(f"**File System Error:** {e}")
+
 def initialize_session_state():
     """
     Initialize Streamlit `st.session_state` keys used by the app.
@@ -117,6 +162,8 @@ def initialize_session_state():
             - documents_loaded: bool flag
             - current_mode: str currently selected mode
             - knowledge_base_info: metadata about the loaded KB
+            - error_count: int for tracking errors
+            - last_error: str for displaying last error
 
     Example:
         >>> initialize_session_state()
@@ -132,8 +179,12 @@ def initialize_session_state():
         st.session_state.current_mode = "interview"
     if 'knowledge_base_info' not in st.session_state:
         st.session_state.knowledge_base_info = {}
+    if 'error_count' not in st.session_state:
+        st.session_state.error_count = 0
+    if 'last_error' not in st.session_state:
+        st.session_state.last_error = None
 
-def create_agent():
+def create_agent() -> Optional[PersonalCodexAgent]:
     """
     Create and initialize a `PersonalCodexAgent` using environment keys.
 
@@ -149,18 +200,16 @@ def create_agent():
         >>> assert agent is not None
     """
     try:
-        # Check for API keys
-        openai_key = os.getenv("OPENAI_API_KEY")
-        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        logger.info("Creating Personal Codex Agent...")
         
-        if not openai_key and not anthropic_key:
+        # Get LLM provider from config
+        llm_provider = config.get_llm_provider()
+        
+        if llm_provider == "none":
             st.warning("⚠️ No API keys found. Please set OPENAI_API_KEY or ANTHROPIC_API_KEY environment variables.")
             st.info("The agent will work with limited functionality using fallback responses.")
-            llm_provider = "none"
-        else:
-            llm_provider = "openai" if openai_key else "anthropic"
         
-        # Create agent
+        # Create agent with error handling
         agent = PersonalCodexAgent(
             llm_provider=llm_provider,
             vector_db_type="faiss",  # Use FAISS for better performance
@@ -168,9 +217,22 @@ def create_agent():
             chunk_overlap=200
         )
         
+        logger.info(f"Agent created successfully with provider: {llm_provider}")
         return agent
+        
+    except PersonalCodexException as e:
+        logger.error(f"Personal Codex error creating agent: {e}")
+        st.error(f"❌ Agent creation failed: {e}")
+        st.session_state.error_count += 1
+        st.session_state.last_error = str(e)
+        return None
+        
     except Exception as e:
-        st.error(f"Error creating agent: {e}")
+        logger.error(f"Unexpected error creating agent: {e}")
+        logger.error(traceback.format_exc())
+        st.error(f"❌ Unexpected error creating agent: {e}")
+        st.session_state.error_count += 1
+        st.session_state.last_error = str(e)
         return None
 
 def load_documents(agent: PersonalCodexAgent, uploaded_files: List[Any]) -> bool:
@@ -195,35 +257,65 @@ def load_documents(agent: PersonalCodexAgent, uploaded_files: List[Any]) -> bool
         >>> success = load_documents(agent, uploaded_files)
     """
     if not uploaded_files:
+        st.warning("No files uploaded")
         return False
     
     try:
+        logger.info(f"Processing {len(uploaded_files)} uploaded files...")
+        
         # Create temporary directory for uploaded files
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             
             # Save uploaded files to temporary directory
             for uploaded_file in uploaded_files:
-                file_path = temp_path / uploaded_file.name
-                with open(file_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
+                try:
+                    file_path = temp_path / uploaded_file.name
+                    with open(file_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+                    logger.info(f"Saved uploaded file: {uploaded_file.name}")
+                except Exception as e:
+                    logger.error(f"Error saving file {uploaded_file.name}: {e}")
+                    st.error(f"Error saving file {uploaded_file.name}: {e}")
+                    continue
             
             # Process documents
             success = agent.load_documents(str(temp_path))
             
             if success:
                 # Save knowledge base
-                agent.save_knowledge_base()
+                try:
+                    agent.save_knowledge_base()
+                    logger.info("Knowledge base saved successfully")
+                except Exception as e:
+                    logger.warning(f"Could not save knowledge base: {e}")
+                    st.warning(f"Could not save knowledge base: {e}")
                 
                 # Update session state
-                st.session_state.knowledge_base_info = agent.get_knowledge_base_info()
+                try:
+                    st.session_state.knowledge_base_info = agent.get_knowledge_base_info()
+                    logger.info("Session state updated with knowledge base info")
+                except Exception as e:
+                    logger.warning(f"Could not update session state: {e}")
                 
                 return True
             else:
+                logger.error("Document processing failed")
                 return False
                 
+    except PersonalCodexException as e:
+        logger.error(f"Personal Codex error processing documents: {e}")
+        st.error(f"❌ Document processing failed: {e}")
+        st.session_state.error_count += 1
+        st.session_state.last_error = str(e)
+        return False
+        
     except Exception as e:
-        st.error(f"Error processing documents: {e}")
+        logger.error(f"Unexpected error processing documents: {e}")
+        logger.error(traceback.format_exc())
+        st.error(f"❌ Unexpected error processing documents: {e}")
+        st.session_state.error_count += 1
+        st.session_state.last_error = str(e)
         return False
 
 def display_chat_message(message: Dict[str, Any], is_user: bool = False):
@@ -275,6 +367,7 @@ def main():
         - Offer agent/config controls in the sidebar
         - Process document uploads and initialize knowledge base
         - Manage chat input and display conversation history
+        - Handle errors gracefully with comprehensive error reporting
 
     Returns:
         None
@@ -284,22 +377,46 @@ def main():
         >>> streamlit run app.py
     """
     
-    # Initialize session state
-    initialize_session_state()
-    
-    # Header
-    st.markdown('<h1 class="main-header">🧠 Personal Codex Agent</h1>', unsafe_allow_html=True)
-    
-    # Mock mode display
-    if IS_MOCK:
-        st.warning("🎭 Running in Mock Mode - No API key required for demonstration")
-        st.info("Add your OpenAI API key to .env file for full functionality")
-    
-    st.markdown("""
-    <p style="text-align: center; font-size: 1.1rem; color: #666;">
-        Your AI-powered personal representative, trained on your documents and experiences
-    </p>
-    """, unsafe_allow_html=True)
+    try:
+        # Initialize session state
+        initialize_session_state()
+        
+        # Header
+        st.markdown('<h1 class="main-header">🧠 Personal Codex Agent</h1>', unsafe_allow_html=True)
+        
+        # Mock mode display
+        if IS_MOCK:
+            st.warning("🎭 Running in Mock Mode - No API key required for demonstration")
+            st.info("Add your OpenAI API key to .env file for full functionality")
+        
+        # Cloud deployment info
+        if config.is_cloud_deployment:
+            st.info("☁️ Running in Streamlit Cloud - Enhanced error handling enabled")
+        
+        st.markdown("""
+        <p style="text-align: center; font-size: 1.1rem; color: #666;">
+            Your AI-powered personal representative, trained on your documents and experiences
+        </p>
+        """, unsafe_allow_html=True)
+        
+        # Error display
+        if st.session_state.error_count > 0:
+            st.error(f"⚠️ {st.session_state.error_count} error(s) occurred. Last error: {st.session_state.last_error}")
+            if st.button("Clear Errors"):
+                st.session_state.error_count = 0
+                st.session_state.last_error = None
+                st.rerun()
+        
+        # Debug information (collapsible)
+        display_debug_info()
+        
+    except Exception as e:
+        logger.error(f"Critical error in main function: {e}")
+        logger.error(traceback.format_exc())
+        st.error(f"❌ Critical application error: {e}")
+        st.error("Please check the debug information below and try refreshing the page.")
+        display_debug_info()
+        return
     
     # Sidebar
     with st.sidebar:
@@ -346,13 +463,28 @@ def main():
         # Initialize/Create Agent Button
         if st.button("🔄 Initialize Agent", type="primary"):
             with st.spinner("Initializing Personal Codex Agent..."):
-                st.session_state.agent = PersonalCodexAgent(
-                    llm_provider=llm_provider,
-                    vector_db_type=vector_db_type,
-                    chunk_size=chunk_size,
-                    chunk_overlap=chunk_overlap
-                )
-                st.success("Agent initialized successfully!")
+                try:
+                    st.session_state.agent = PersonalCodexAgent(
+                        llm_provider=llm_provider,
+                        vector_db_type=vector_db_type,
+                        chunk_size=chunk_size,
+                        chunk_overlap=chunk_overlap
+                    )
+                    st.success("✅ Agent initialized successfully!")
+                    st.session_state.error_count = 0  # Reset error count on success
+                    st.session_state.last_error = None
+                    logger.info("Agent initialized successfully via UI")
+                except PersonalCodexException as e:
+                    logger.error(f"Personal Codex error initializing agent: {e}")
+                    st.error(f"❌ Agent initialization failed: {e}")
+                    st.session_state.error_count += 1
+                    st.session_state.last_error = str(e)
+                except Exception as e:
+                    logger.error(f"Unexpected error initializing agent: {e}")
+                    logger.error(traceback.format_exc())
+                    st.error(f"❌ Unexpected error initializing agent: {e}")
+                    st.session_state.error_count += 1
+                    st.session_state.last_error = str(e)
         
         # Agent Status
         if st.session_state.agent:
@@ -383,12 +515,22 @@ def main():
         if uploaded_files and st.button("📥 Process Documents"):
             if st.session_state.agent:
                 with st.spinner("Processing documents..."):
-                    success = load_documents(st.session_state.agent, uploaded_files)
-                    if success:
-                        st.session_state.documents_loaded = True
-                        st.success(f"✅ Successfully processed {len(uploaded_files)} documents!")
-                    else:
-                        st.error("❌ Failed to process documents")
+                    try:
+                        success = load_documents(st.session_state.agent, uploaded_files)
+                        if success:
+                            st.session_state.documents_loaded = True
+                            st.success(f"✅ Successfully processed {len(uploaded_files)} documents!")
+                            st.session_state.error_count = 0  # Reset error count on success
+                            st.session_state.last_error = None
+                            logger.info(f"Successfully processed {len(uploaded_files)} documents")
+                        else:
+                            st.error("❌ Failed to process documents")
+                            logger.error("Document processing failed")
+                    except Exception as e:
+                        logger.error(f"Error in document processing UI: {e}")
+                        st.error(f"❌ Error processing documents: {e}")
+                        st.session_state.error_count += 1
+                        st.session_state.last_error = str(e)
             else:
                 st.error("Please initialize the agent first")
     
@@ -446,31 +588,70 @@ def main():
             user_input = st.chat_input("Ask me anything about your experience, skills, or background...")
             
             if user_input:
-                # Add user message to history
-                st.session_state.chat_history.append({
-                    'type': 'user',
-                    'content': user_input,
-                    'timestamp': None
-                })
-                
-                # Generate agent response
-                with st.spinner("🤔 Thinking..."):
-                    # Core RAG flow: agent searches the KB, formats prompts, and
-                    # calls the configured LLM (or mock) to generate a response.
-                    response = st.session_state.agent.generate_response(user_input)
-                    
-                    # Add agent response to history
+                try:
+                    # Add user message to history
                     st.session_state.chat_history.append({
-                        'type': 'agent',
-                        'content': response['response'],
-                        'mode': response['mode'],
-                        'confidence': response['confidence'],
-                        'sources': response.get('sources', []),
+                        'type': 'user',
+                        'content': user_input,
                         'timestamp': None
                     })
-                
-                # Rerun to display new messages
-                st.rerun()
+                    
+                    # Generate agent response
+                    with st.spinner("🤔 Thinking..."):
+                        try:
+                            # Core RAG flow: agent searches the KB, formats prompts, and
+                            # calls the configured LLM (or mock) to generate a response.
+                            response = st.session_state.agent.generate_response(user_input)
+                            
+                            # Add agent response to history
+                            st.session_state.chat_history.append({
+                                'type': 'agent',
+                                'content': response['response'],
+                                'mode': response['mode'],
+                                'confidence': response['confidence'],
+                                'sources': response.get('sources', []),
+                                'timestamp': None
+                            })
+                            
+                            logger.info(f"Generated response for query: {user_input[:50]}...")
+                            
+                        except PersonalCodexException as e:
+                            logger.error(f"Personal Codex error generating response: {e}")
+                            error_response = {
+                                'type': 'agent',
+                                'content': f"❌ Error generating response: {e}",
+                                'mode': 'error',
+                                'confidence': 'low',
+                                'sources': [],
+                                'timestamp': None
+                            }
+                            st.session_state.chat_history.append(error_response)
+                            st.session_state.error_count += 1
+                            st.session_state.last_error = str(e)
+                            
+                        except Exception as e:
+                            logger.error(f"Unexpected error generating response: {e}")
+                            logger.error(traceback.format_exc())
+                            error_response = {
+                                'type': 'agent',
+                                'content': f"❌ Unexpected error: {e}",
+                                'mode': 'error',
+                                'confidence': 'low',
+                                'sources': [],
+                                'timestamp': None
+                            }
+                            st.session_state.chat_history.append(error_response)
+                            st.session_state.error_count += 1
+                            st.session_state.last_error = str(e)
+                    
+                    # Rerun to display new messages
+                    st.rerun()
+                    
+                except Exception as e:
+                    logger.error(f"Error in chat interface: {e}")
+                    st.error(f"❌ Error in chat interface: {e}")
+                    st.session_state.error_count += 1
+                    st.session_state.last_error = str(e)
     
     with col2:
         # Quick Actions Panel
@@ -502,6 +683,47 @@ def main():
                 st.write(f"**Current Mode:** {summary['current_mode'].title()}")
                 st.write(f"**Documents Loaded:** {'✅' if summary['documents_loaded'] else '❌'}")
                 st.write(f"**Knowledge Base:** {'✅' if summary['knowledge_base_initialized'] else '❌'}")
+        
+        # Performance Dashboard
+        if st.session_state.agent:
+            st.subheader("📊 Performance Dashboard")
+            
+            if st.button("🔄 Refresh Performance Data"):
+                st.rerun()
+            
+            try:
+                dashboard = get_performance_dashboard()
+                
+                # Performance Stats
+                perf_stats = dashboard.get('performance_stats', {})
+                if perf_stats:
+                    st.write("**Function Performance:**")
+                    for func_name, stats in list(perf_stats.items())[:5]:  # Show top 5
+                        st.write(f"• {func_name}: {stats['avg_time']:.2f}s avg ({stats['call_count']} calls)")
+                
+                # Cache Stats
+                cache_stats = dashboard.get('cache_stats', {})
+                if cache_stats:
+                    st.write(f"**Cache Hit Rate:** {cache_stats.get('hit_rate', 0):.1%}")
+                    st.write(f"**Cache Size:** {cache_stats.get('size', 0)}/{cache_stats.get('max_size', 0)}")
+                
+                # Error Rate
+                error_rate = performance_monitor.get_error_rate()
+                if error_rate > 0:
+                    st.warning(f"**Error Rate:** {error_rate:.1%}")
+                else:
+                    st.success("**Error Rate:** 0%")
+                
+                # Recent Metrics
+                recent_metrics = dashboard.get('recent_metrics', [])
+                if recent_metrics:
+                    st.write("**Recent Operations:**")
+                    for metric in recent_metrics[-3:]:  # Show last 3
+                        status = "✅" if metric['success'] else "❌"
+                        st.write(f"{status} {metric['function_name']}: {metric['execution_time']:.2f}s")
+                
+            except Exception as e:
+                st.error(f"Error loading performance data: {e}")
         
         # Help and Information
         st.subheader("❓ Help")
